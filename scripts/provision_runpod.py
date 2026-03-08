@@ -17,11 +17,114 @@ REST_BASE = "https://rest.runpod.io/v1"
 GRAPHQL_BASE = "https://api.runpod.io/graphql"
 S3_ENDPOINTS = {
     "EUR-IS-1": "https://s3api-eur-is-1.runpod.io",
+    "EUR-NO-1": "https://s3api-eur-no-1.runpod.io",
     "EU-RO-1": "https://s3api-eu-ro-1.runpod.io",
     "EU-CZ-1": "https://s3api-eu-cz-1.runpod.io",
-    "US-KS-2": "https://s3api-us-ks-2.runpod.io",
     "US-CA-2": "https://s3api-us-ca-2.runpod.io",
+    "US-GA-2": "https://s3api-us-ga-2.runpod.io",
+    "US-KS-2": "https://s3api-us-ks-2.runpod.io",
+    "US-MD-1": "https://s3api-us-md-1.runpod.io",
+    "US-MO-2": "https://s3api-us-mo-2.runpod.io",
+    "US-NC-1": "https://s3api-us-nc-1.runpod.io",
+    "US-NC-2": "https://s3api-us-nc-2.runpod.io",
 }
+TEMPLATE_UPDATE_KEYS = {
+    "containerDiskInGb",
+    "containerRegistryAuthId",
+    "dockerEntrypoint",
+    "dockerStartCmd",
+    "env",
+    "imageName",
+    "isPublic",
+    "name",
+    "ports",
+    "readme",
+    "volumeInGb",
+    "volumeMountPath",
+}
+ENDPOINT_UPDATE_KEYS = {
+    "allowedCudaVersions",
+    "cpuFlavorIds",
+    "dataCenterIds",
+    "executionTimeoutMs",
+    "flashboot",
+    "gpuCount",
+    "gpuTypeIds",
+    "idleTimeout",
+    "minCudaVersion",
+    "name",
+    "networkVolumeId",
+    "networkVolumeIds",
+    "scalerType",
+    "scalerValue",
+    "templateId",
+    "vcpuCount",
+    "workersMax",
+    "workersMin",
+}
+GRAPHQL_ENDPOINT_QUERY = """
+query {
+  myself {
+    endpoints {
+      id
+      name
+      templateId
+      gpuIds
+      workersMin
+      workersMax
+      idleTimeout
+      locations
+      scalerType
+      scalerValue
+      networkVolumeId
+      networkVolumeIds {
+        networkVolumeId
+        dataCenterId
+      }
+      gpuCount
+      instanceIds
+      workersPFBTarget
+      allowedCudaVersions
+      minCudaVersion
+      executionTimeoutMs
+      flashBootType
+      flashEnvironmentId
+      type
+      modelReferences
+    }
+    clientBalance
+  }
+}
+"""
+GRAPHQL_SAVE_ENDPOINT_MUTATION = """
+mutation SaveEndpoint($input: EndpointInput!) {
+  saveEndpoint(input: $input) {
+    id
+    name
+    templateId
+    gpuIds
+    workersMin
+    workersMax
+    idleTimeout
+    locations
+    scalerType
+    scalerValue
+    networkVolumeId
+    networkVolumeIds {
+      networkVolumeId
+      dataCenterId
+    }
+    gpuCount
+    allowedCudaVersions
+    minCudaVersion
+    executionTimeoutMs
+    flashBootType
+    flashEnvironmentId
+    type
+    modelReferences
+  }
+}
+"""
 
 
 class RunpodClient:
@@ -37,7 +140,12 @@ class RunpodClient:
             json=payload,
             timeout=60,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise RuntimeError(
+                f"REST {method} {path} failed with {response.status_code}: {response.text}"
+            ) from exc
         if response.text:
             return response.json()
         return None
@@ -61,6 +169,18 @@ class RunpodClient:
     def list_endpoints(self) -> list[dict[str, Any]]:
         data = self.rest("GET", "/endpoints")
         return data if isinstance(data, list) else data.get("items", [])
+
+    def list_graphql_endpoints(self) -> list[dict[str, Any]]:
+        data = self.graphql(GRAPHQL_ENDPOINT_QUERY)
+        return data["myself"]["endpoints"]
+
+    def get_client_balance(self) -> float:
+        data = self.graphql("query { myself { clientBalance } }")
+        return float(data["myself"]["clientBalance"])
+
+    def save_graphql_endpoint(self, payload: dict[str, Any]) -> dict[str, Any]:
+        data = self.graphql(GRAPHQL_SAVE_ENDPOINT_MUTATION, {"input": payload})
+        return data["saveEndpoint"]
 
     def list_network_volumes(self) -> list[dict[str, Any]]:
         data = self.rest("GET", "/networkvolumes")
@@ -124,6 +244,40 @@ def s3_endpoint_for_datacenter(data_center_id: str) -> str | None:
     return S3_ENDPOINTS.get(data_center_id)
 
 
+def normalize_network_volume_configs(full_config: dict[str, Any]) -> list[dict[str, Any]]:
+    multi_cfg = full_config.get("network_volumes")
+    if multi_cfg:
+        if isinstance(multi_cfg, dict):
+            if not multi_cfg.get("enabled", True):
+                return []
+            volume_cfgs = multi_cfg.get("volumes", [])
+        elif isinstance(multi_cfg, list):
+            volume_cfgs = multi_cfg
+        else:
+            raise RuntimeError("network_volumes must be either an object or an array")
+        if not isinstance(volume_cfgs, list):
+            raise RuntimeError("network_volumes.volumes must be an array")
+        return volume_cfgs
+
+    single_cfg = full_config.get("network_volume")
+    if single_cfg:
+        if not single_cfg.get("enabled"):
+            return []
+        return [single_cfg]
+
+    endpoint_cfg = full_config.get("endpoint", {})
+    network_volume_ids = endpoint_cfg.get("network_volume_ids", [])
+    if network_volume_ids:
+        if not isinstance(network_volume_ids, list):
+            raise RuntimeError("endpoint.network_volume_ids must be an array")
+        return [{"id": item} for item in network_volume_ids]
+
+    network_volume_id = endpoint_cfg.get("network_volume_id")
+    if network_volume_id:
+        return [{"id": network_volume_id}]
+
+    return []
+
 def build_template_payload(
     config_dir: Path,
     full_config: dict[str, Any],
@@ -159,21 +313,24 @@ def build_template_payload(
 def build_endpoint_payload(
     template_id: str,
     full_config: dict[str, Any],
-    network_volume: dict[str, Any] | None,
+    network_volumes: list[dict[str, Any]],
 ) -> dict[str, Any]:
     endpoint_cfg = full_config["endpoint"]
-    network_volume_id = network_volume["id"] if network_volume else None
-    network_volume_dc = network_volume.get("dataCenterId") if network_volume else None
+    network_volume_ids = [item["id"] for item in network_volumes]
+    network_volume_dcs = [item["dataCenterId"] for item in network_volumes]
     data_center_ids = endpoint_cfg.get("data_center_ids", [])
 
-    if network_volume_id and network_volume_dc:
-        if data_center_ids and any(item != network_volume_dc for item in data_center_ids):
+    if len(set(network_volume_dcs)) != len(network_volume_dcs):
+        raise RuntimeError("each attached network volume must belong to a distinct data center")
+
+    if network_volume_ids:
+        if data_center_ids and set(data_center_ids) != set(network_volume_dcs):
             raise RuntimeError(
-                "endpoint.data_center_ids must match the network volume data center when a network volume is attached: "
-                f"{network_volume_dc}"
+                "endpoint.data_center_ids must match the attached network volume data centers when network volumes are attached: "
+                f"{', '.join(sorted(network_volume_dcs))}"
             )
         if not data_center_ids:
-            data_center_ids = [network_volume_dc]
+            data_center_ids = network_volume_dcs.copy()
 
     payload: dict[str, Any] = {
         "name": endpoint_cfg["name"],
@@ -198,8 +355,104 @@ def build_endpoint_payload(
         payload["cpuFlavorIds"] = endpoint_cfg["cpu_flavor_ids"]
         payload["vcpuCount"] = endpoint_cfg.get("vcpu_count", 2)
 
-    if network_volume_id:
-        payload["networkVolumeId"] = network_volume_id
+    if len(network_volume_ids) == 1:
+        payload["networkVolumeId"] = network_volume_ids[0]
+    elif len(network_volume_ids) > 1:
+        raise RuntimeError("build_endpoint_payload only supports REST/single-volume endpoint creation")
+
+    return payload
+
+
+def pick_update_payload(payload: dict[str, Any], allowed_keys: set[str]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key in allowed_keys}
+
+
+def normalize_endpoint_name(name: str) -> str:
+    return name.removesuffix(" -fb")
+
+
+def parse_locations(locations: str | None) -> list[str]:
+    if not locations:
+        return []
+    return [item.strip() for item in locations.split(",") if item.strip()]
+
+
+def endpoint_output_record(endpoint: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": endpoint["id"],
+        "name": endpoint["name"],
+        "url": f"https://api.runpod.ai/v2/{endpoint['id']}",
+        "data_center_ids": parse_locations(endpoint.get("locations")),
+    }
+
+
+def select_graphql_endpoint(client: RunpodClient, name: str) -> dict[str, Any] | None:
+    expected_name = normalize_endpoint_name(name)
+    return next(
+        (item for item in client.list_graphql_endpoints() if normalize_endpoint_name(item["name"]) == expected_name),
+        None,
+    )
+
+
+def build_graphql_endpoint_input(
+    existing_endpoint: dict[str, Any],
+    template_id: str,
+    full_config: dict[str, Any],
+    network_volumes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    endpoint_cfg = full_config["endpoint"]
+    network_volume_dcs = [item["dataCenterId"] for item in network_volumes]
+    data_center_ids = endpoint_cfg.get("data_center_ids", [])
+
+    if len(set(network_volume_dcs)) != len(network_volume_dcs):
+        raise RuntimeError("each attached network volume must belong to a distinct data center")
+
+    if data_center_ids and set(data_center_ids) != set(network_volume_dcs):
+        raise RuntimeError(
+            "endpoint.data_center_ids must match the attached network volume data centers when network volumes are attached: "
+            f"{', '.join(sorted(network_volume_dcs))}"
+        )
+    if not data_center_ids:
+        data_center_ids = network_volume_dcs.copy()
+
+    gpu_ids = existing_endpoint.get("gpuIds")
+    if not gpu_ids:
+        raise RuntimeError("failed to resolve GraphQL gpuIds for native multi-region endpoint")
+
+    flash_boot_type = endpoint_cfg.get("flash_boot_type")
+    if not flash_boot_type:
+        flash_boot_type = "FLASHBOOT" if endpoint_cfg.get("flashboot", True) else "OFF"
+
+    payload: dict[str, Any] = {
+        "id": existing_endpoint["id"],
+        "name": endpoint_cfg["name"],
+        "templateId": template_id,
+        "gpuIds": gpu_ids,
+        "workersMin": endpoint_cfg.get("workers_min", 0),
+        "workersMax": endpoint_cfg.get("workers_max", 3),
+        "idleTimeout": endpoint_cfg.get("idle_timeout", 5),
+        "locations": ",".join(data_center_ids),
+        "scalerType": endpoint_cfg.get("scaler_type", "QUEUE_DELAY"),
+        "scalerValue": endpoint_cfg.get("scaler_value", 4),
+        "networkVolumeIds": [{"networkVolumeId": item["id"]} for item in network_volumes],
+        "gpuCount": endpoint_cfg.get("gpu_count", 1),
+        "executionTimeoutMs": endpoint_cfg.get("execution_timeout_ms", 900000),
+        "flashBootType": flash_boot_type,
+        "bindEndpoint": endpoint_cfg.get("bind_endpoint", True),
+        "type": endpoint_cfg.get("type") or existing_endpoint.get("type") or "QB",
+    }
+
+    allowed_cuda_versions = endpoint_cfg.get("allowed_cuda_versions")
+    if allowed_cuda_versions:
+        payload["allowedCudaVersions"] = ",".join(allowed_cuda_versions)
+    elif existing_endpoint.get("allowedCudaVersions"):
+        payload["allowedCudaVersions"] = existing_endpoint["allowedCudaVersions"]
+
+    min_cuda_version = endpoint_cfg.get("min_cuda_version")
+    if min_cuda_version:
+        payload["minCudaVersion"] = min_cuda_version
+    elif existing_endpoint.get("minCudaVersion"):
+        payload["minCudaVersion"] = existing_endpoint["minCudaVersion"]
 
     return payload
 
@@ -241,14 +494,7 @@ def ensure_container_registry_auth(client: RunpodClient, full_config: dict[str, 
     return created["id"]
 
 
-def ensure_network_volume(client: RunpodClient, full_config: dict[str, Any]) -> dict[str, Any] | None:
-    volume_cfg = full_config.get("network_volume")
-    if not volume_cfg or not volume_cfg.get("enabled"):
-        network_volume_id = full_config.get("endpoint", {}).get("network_volume_id")
-        if not network_volume_id:
-            return None
-        return client.get_network_volume(network_volume_id)
-
+def ensure_network_volume(client: RunpodClient, volume_cfg: dict[str, Any]) -> dict[str, Any]:
     if volume_cfg.get("id"):
         return client.get_network_volume(volume_cfg["id"])
 
@@ -267,11 +513,23 @@ def ensure_network_volume(client: RunpodClient, full_config: dict[str, Any]) -> 
     return created
 
 
+def ensure_network_volumes(client: RunpodClient, full_config: dict[str, Any]) -> list[dict[str, Any]]:
+    volume_cfgs = normalize_network_volume_configs(full_config)
+    if not volume_cfgs:
+        return []
+
+    ensured = [ensure_network_volume(client, volume_cfg) for volume_cfg in volume_cfgs]
+    data_center_ids = [item["dataCenterId"] for item in ensured]
+    if len(set(data_center_ids)) != len(data_center_ids):
+        raise RuntimeError("network volumes must be unique per data center")
+    return ensured
+
+
 def upsert_template(client: RunpodClient, payload: dict[str, Any]) -> dict[str, Any]:
     existing = next((item for item in client.list_templates() if item["name"] == payload["name"]), None)
     if existing:
         template_id = existing["id"]
-        updated = client.rest("PATCH", f"/templates/{template_id}", payload)
+        updated = client.rest("PATCH", f"/templates/{template_id}", pick_update_payload(payload, TEMPLATE_UPDATE_KEYS))
         print(f"[runpod] template updated: {payload['name']} ({template_id})")
         return updated
 
@@ -281,16 +539,46 @@ def upsert_template(client: RunpodClient, payload: dict[str, Any]) -> dict[str, 
 
 
 def upsert_endpoint(client: RunpodClient, payload: dict[str, Any]) -> dict[str, Any]:
-    existing = next((item for item in client.list_endpoints() if item["name"] == payload["name"]), None)
+    expected_name = normalize_endpoint_name(payload["name"])
+    existing = next(
+        (item for item in client.list_endpoints() if normalize_endpoint_name(item["name"]) == expected_name),
+        None,
+    )
     if existing:
         endpoint_id = existing["id"]
-        updated = client.rest("PATCH", f"/endpoints/{endpoint_id}", payload)
+        updated = client.rest("PATCH", f"/endpoints/{endpoint_id}", pick_update_payload(payload, ENDPOINT_UPDATE_KEYS))
         print(f"[runpod] endpoint updated: {payload['name']} ({endpoint_id})")
         return updated
 
     created = client.rest("POST", "/endpoints", payload)
     print(f"[runpod] endpoint created: {payload['name']} ({created['id']})")
     return created
+
+
+def upsert_native_multi_region_endpoint(
+    client: RunpodClient,
+    template_id: str,
+    full_config: dict[str, Any],
+    network_volumes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    endpoint_name = full_config["endpoint"]["name"]
+    existing_graphql = select_graphql_endpoint(client, endpoint_name)
+
+    if not existing_graphql:
+        bootstrap_config = json.loads(json.dumps(full_config))
+        bootstrap_config["endpoint"]["data_center_ids"] = [network_volumes[0]["dataCenterId"]]
+        bootstrap_endpoint = upsert_endpoint(
+            client,
+            build_endpoint_payload(template_id, bootstrap_config, [network_volumes[0]]),
+        )
+        existing_graphql = select_graphql_endpoint(client, bootstrap_endpoint["name"])
+        if not existing_graphql:
+            raise RuntimeError("failed to bootstrap native multi-region endpoint via REST before GraphQL update")
+
+    graphql_payload = build_graphql_endpoint_input(existing_graphql, template_id, full_config, network_volumes)
+    saved = client.save_graphql_endpoint(graphql_payload)
+    print(f"[runpod] endpoint updated via GraphQL native multi-region: {saved['name']} ({saved['id']})")
+    return saved
 
 
 def main() -> None:
@@ -309,26 +597,46 @@ def main() -> None:
 
     ensure_secrets(client, full_config)
     container_registry_auth_id = ensure_container_registry_auth(client, full_config)
-    network_volume = ensure_network_volume(client, full_config)
+    network_volumes = ensure_network_volumes(client, full_config)
 
     template_payload = build_template_payload(config_dir, full_config, container_registry_auth_id)
     template = upsert_template(client, template_payload)
+    multi_region_mode = full_config.get("endpoint", {}).get("multi_region_mode", "native")
 
-    endpoint_payload = build_endpoint_payload(template["id"], full_config, network_volume)
-    endpoint = upsert_endpoint(client, endpoint_payload)
+    if len(network_volumes) > 1 and multi_region_mode == "native":
+        endpoints = [upsert_native_multi_region_endpoint(client, template["id"], full_config, network_volumes)]
+    else:
+        endpoint_payload = build_endpoint_payload(template["id"], full_config, network_volumes)
+        endpoints = [upsert_endpoint(client, endpoint_payload)]
 
-    network_volume_s3_endpoint = None
-    if network_volume:
-        network_volume_s3_endpoint = s3_endpoint_for_datacenter(network_volume.get("dataCenterId", ""))
+    network_volume_s3_endpoints = [
+        {
+            "id": item["id"],
+            "data_center_id": item["dataCenterId"],
+            "endpoint_url": s3_endpoint_for_datacenter(item["dataCenterId"]),
+        }
+        for item in network_volumes
+    ]
+
+    network_volume = network_volumes[0] if len(network_volumes) == 1 else None
+    endpoint = endpoints[0] if len(endpoints) == 1 else None
+    client_balance = client.get_client_balance()
 
     output = {
         "template_id": template["id"],
-        "endpoint_id": endpoint["id"],
-        "endpoint_url": f"https://api.runpod.ai/v2/{endpoint['id']}",
+        "endpoint_id": endpoint["id"] if endpoint else None,
+        "endpoint_url": f"https://api.runpod.ai/v2/{endpoint['id']}" if endpoint else None,
         "network_volume_id": network_volume["id"] if network_volume else None,
         "network_volume_data_center_id": network_volume.get("dataCenterId") if network_volume else None,
-        "network_volume_s3_endpoint": network_volume_s3_endpoint,
+        "network_volume_s3_endpoint": (
+            s3_endpoint_for_datacenter(network_volume.get("dataCenterId", "")) if network_volume else None
+        ),
+        "endpoints": [endpoint_output_record(item) for item in endpoints],
+        "network_volume_ids": [item["id"] for item in network_volumes],
+        "network_volume_data_center_ids": [item["dataCenterId"] for item in network_volumes],
+        "network_volume_s3_endpoints": network_volume_s3_endpoints,
         "container_registry_auth_id": container_registry_auth_id,
+        "client_balance_usd": client_balance,
     }
     print(json.dumps(output, indent=2))
 

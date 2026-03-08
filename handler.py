@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import ipaddress
 import json
 import logging
@@ -39,9 +40,12 @@ LOGGER = logging.getLogger("arrakis-comfyui")
 
 COMFY_HOST = os.environ.get("COMFY_HOST", "127.0.0.1:8188")
 COMFY_INPUT_ROOT = Path(os.environ.get("COMFY_INPUT_ROOT", "/comfyui/input"))
+COMFY_OUTPUT_ROOT = Path(os.environ.get("COMFY_OUTPUT_ROOT", "/comfyui/output"))
 
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", "100"))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", "300"))
+COMFY_HISTORY_INTERVAL_MS = int(os.environ.get("COMFY_HISTORY_INTERVAL_MS", "250"))
+COMFY_HISTORY_MAX_RETRIES = int(os.environ.get("COMFY_HISTORY_MAX_RETRIES", "120"))
 WEBSOCKET_RECONNECT_ATTEMPTS = int(os.environ.get("WEBSOCKET_RECONNECT_ATTEMPTS", "5"))
 WEBSOCKET_RECONNECT_DELAY_S = int(os.environ.get("WEBSOCKET_RECONNECT_DELAY_S", "3"))
 REFRESH_WORKER = os.environ.get("REFRESH_WORKER", "false").lower() == "true"
@@ -156,11 +160,33 @@ def _validate_url(url: str) -> None:
 
     try:
         ip = ipaddress.ip_address(host)
-        if ip.is_private or ip.is_loopback or ip.is_link_local:
-            raise ValueError("URL points to a private IP")
+        _validate_ip_address(ip)
     except ValueError as exc:
         if "private" in str(exc) or "restricted" in str(exc) or "loopback" in str(exc):
             raise
+        for resolved_ip in _resolve_host_ips(host):
+            _validate_ip_address(resolved_ip)
+
+
+def _validate_ip_address(ip: ipaddress._BaseAddress) -> None:
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        raise ValueError("URL points to a restricted IP")
+
+
+def _resolve_host_ips(host: str) -> set[ipaddress._BaseAddress]:
+    try:
+        info = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return set()
+
+    return {ipaddress.ip_address(item[4][0]) for item in info}
 
 
 def _strip_data_uri(value: str) -> str:
@@ -270,7 +296,10 @@ def prepare_assets(job_id: str, assets: list[dict[str, Any]]) -> dict[str, str]:
         destination = job_dir / safe_name
 
         if asset.get("data"):
-            destination.write_bytes(base64.b64decode(_strip_data_uri(asset["data"])))
+            try:
+                destination.write_bytes(base64.b64decode(_strip_data_uri(asset["data"])))
+            except binascii.Error as exc:
+                raise ValueError(f"asset '{original_name}' is not valid base64") from exc
         else:
             with requests.get(asset["url"], stream=True, timeout=120) as response:
                 response.raise_for_status()
@@ -349,6 +378,21 @@ def get_history(prompt_id: str) -> dict[str, Any]:
     return response.json()
 
 
+def wait_for_prompt_history(
+    prompt_id: str,
+    retries: int = COMFY_HISTORY_MAX_RETRIES,
+    delay_ms: int = COMFY_HISTORY_INTERVAL_MS,
+) -> dict[str, Any]:
+    last_history: dict[str, Any] = {}
+    for _ in range(retries):
+        last_history = get_history(prompt_id)
+        prompt_history = last_history.get(prompt_id)
+        if isinstance(prompt_history, dict):
+            return prompt_history
+        time.sleep(delay_ms / 1000)
+    raise RuntimeError(f"prompt history did not become available for {prompt_id}")
+
+
 def wait_for_completion(client_id: str, prompt_id: str) -> None:
     websocket = _websocket()
     requests = _requests()
@@ -419,6 +463,60 @@ def fetch_output_bytes(file_info: dict[str, Any]) -> bytes:
     payload = b"".join(response.iter_content(1024 * 1024))
     response.close()
     return payload
+
+
+def output_path_for_file_info(file_info: dict[str, Any]) -> Path | None:
+    if file_info.get("type") == "temp":
+        return None
+
+    filename = Path(file_info["filename"]).name
+    subfolder = Path(file_info.get("subfolder", ""))
+    candidate = (COMFY_OUTPUT_ROOT / subfolder / filename).resolve()
+    output_root = COMFY_OUTPUT_ROOT.resolve()
+
+    if not candidate.is_relative_to(output_root):
+        raise ValueError(f"unsafe output path returned by ComfyUI: {candidate}")
+    return candidate
+
+
+def iter_output_file_infos(prompt_history: dict[str, Any]) -> list[dict[str, Any]]:
+    file_infos: list[dict[str, Any]] = []
+    for node_output in (prompt_history.get("outputs") or {}).values():
+        for value in node_output.values():
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict) and item.get("filename"):
+                        file_infos.append(item)
+            elif isinstance(value, dict) and value.get("filename"):
+                file_infos.append(value)
+    return file_infos
+
+
+def cleanup_prompt_outputs(prompt_history: dict[str, Any]) -> None:
+    for file_info in iter_output_file_infos(prompt_history):
+        try:
+            output_path = output_path_for_file_info(file_info)
+        except ValueError:
+            LOGGER.warning("skipping unsafe output path cleanup for %s", file_info, exc_info=True)
+            continue
+
+        if output_path is None:
+            continue
+        try:
+            output_path.unlink(missing_ok=True)
+            LOGGER.info("removed output file %s", output_path)
+        except Exception:
+            LOGGER.warning("failed to remove output file %s", output_path, exc_info=True)
+            continue
+
+        parent = output_path.parent
+        output_root = COMFY_OUTPUT_ROOT.resolve()
+        while parent != output_root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
 
 
 def store_output_payload(job_id: str, filename: str, payload: bytes, output_mode: str) -> dict[str, Any]:
@@ -531,6 +629,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     job_id = job.get("id") or uuid.uuid4().hex
     workflow = normalized["workflow"]
     assets = normalized["assets"]
+    prompt_id: str | None = None
+    prompt_history: dict[str, Any] | None = None
 
     try:
         if assets:
@@ -550,8 +650,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         wait_for_completion(client_id, prompt_id)
 
         _progress(job, "collecting outputs")
-        history = get_history(prompt_id)
-        prompt_history = history.get(prompt_id, {})
+        prompt_history = wait_for_prompt_history(prompt_id)
         outputs = collect_outputs(job_id, prompt_history, normalized["output_mode"])
 
         result: dict[str, Any] = {
@@ -573,6 +672,14 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         raise
 
     finally:
+        if prompt_id and prompt_history is None:
+            try:
+                prompt_history = wait_for_prompt_history(prompt_id, retries=10, delay_ms=200)
+            except Exception:
+                LOGGER.warning("failed to fetch prompt history during cleanup for %s", prompt_id, exc_info=True)
+
+        if prompt_history:
+            cleanup_prompt_outputs(prompt_history)
         shutil.rmtree(COMFY_INPUT_ROOT / job_id, ignore_errors=True)
 
 

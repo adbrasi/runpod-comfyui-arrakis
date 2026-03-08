@@ -1,0 +1,11 @@
+{
+  "models": [
+    {
+      "source": "hf",
+      "repo_id": "ChenkinNoob/ChenkinNoob-XL-V0.2",
+      "filename": "ChenkinNoob-XL-V0.2.safetensors",
+      "target_path": "models/checkpoints/ChenkinNoob-XL-V0.2.safetensors",
+      "min_size_bytes": 7000000000
+    }
+  ]
+}

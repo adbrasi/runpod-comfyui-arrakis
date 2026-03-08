@@ -14,7 +14,7 @@
     }
   },
   "template": {
-    "name": "arrakis-comfyui-universal",
+    "name": "arrakis-comfyui-universal-eu-canary",
     "image_name": "ghcr.io/your-github-user/your-repo:latest",
     "container_disk_gb": 20,
     "readme_path": "README.md",
@@ -36,27 +36,29 @@
   },
   "network_volume": {
     "enabled": true,
-    "name": "comfy-models-US-KS-2",
+    "name": "arrakis-comfy-models-eu-ro-1",
     "size": 80,
-    "data_center_id": "US-KS-2"
+    "data_center_id": "EU-RO-1"
   },
   "endpoint": {
-    "name": "arrakis-comfy-image-fb",
+    "name": "arrakis-comfy-flex-eu-canary",
     "gpu_type_ids": [
       "NVIDIA RTX A5000",
+      "NVIDIA GeForce RTX 3090",
+      "NVIDIA GeForce RTX 4090",
       "NVIDIA RTX A4500",
-      "NVIDIA A40"
+      "NVIDIA L4"
     ],
     "gpu_count": 1,
-    "workers_min": 0,
-    "workers_max": 3,
+    "workers_min": 1,
+    "workers_max": 4,
     "idle_timeout": 5,
     "execution_timeout_ms": 900000,
     "flashboot": true,
     "scaler_type": "QUEUE_DELAY",
-    "scaler_value": 4,
+    "scaler_value": 2,
     "data_center_ids": [
-      "US-KS-2"
+      "EU-RO-1"
     ]
   }
 }

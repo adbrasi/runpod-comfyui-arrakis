@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import handler
@@ -23,6 +25,17 @@ class HandlerTests(unittest.TestCase):
         payload = {
             "workflow": {"1": {"inputs": {}}},
             "assets": [{"name": "evil.png", "url": "http://127.0.0.1/evil.png"}],
+        }
+
+        normalized = handler.validate_input(payload)
+        with self.assertRaises(ValueError):
+            handler.prepare_assets("job-1", normalized["assets"])
+
+    @patch("handler.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("10.1.2.3", 0))])
+    def test_validate_input_rejects_private_dns_resolution(self, _mock_getaddrinfo):
+        payload = {
+            "workflow": {"1": {"inputs": {}}},
+            "assets": [{"name": "evil.png", "url": "https://example.com/evil.png"}],
         }
 
         normalized = handler.validate_input(payload)
@@ -85,6 +98,50 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(image_output["mode"], "inline")
         self.assertEqual(outputs[1]["type"], "text")
         self.assertEqual(outputs[2]["type"], "json")
+
+    def test_iter_output_file_infos_skips_scalar_values(self):
+        prompt_history = {
+            "outputs": {
+                "1": {
+                    "images": [
+                        {"filename": "image.png", "subfolder": "", "type": "output"},
+                        {"filename": "temp.png", "subfolder": "", "type": "temp"},
+                    ],
+                    "text": ["hello world"],
+                },
+                "2": {
+                    "videos": {"filename": "clip.mp4", "subfolder": "videos", "type": "output"},
+                },
+            }
+        }
+
+        file_infos = handler.iter_output_file_infos(prompt_history)
+
+        self.assertEqual(len(file_infos), 3)
+        self.assertEqual(file_infos[0]["filename"], "image.png")
+        self.assertEqual(file_infos[1]["filename"], "temp.png")
+        self.assertEqual(file_infos[2]["filename"], "clip.mp4")
+
+    def test_cleanup_prompt_outputs_removes_generated_files(self):
+        with TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir)
+            image_path = output_root / "nested" / "image.png"
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            image_path.write_bytes(b"png")
+
+            prompt_history = {
+                "outputs": {
+                    "1": {
+                        "images": [{"filename": "image.png", "subfolder": "nested", "type": "output"}]
+                    }
+                }
+            }
+
+            with patch.object(handler, "COMFY_OUTPUT_ROOT", output_root):
+                handler.cleanup_prompt_outputs(prompt_history)
+
+            self.assertFalse(image_path.exists())
+            self.assertFalse(image_path.parent.exists())
 
 
 if __name__ == "__main__":

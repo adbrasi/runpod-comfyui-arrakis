@@ -36,7 +36,7 @@
   },
   "network_volume": {
     "enabled": true,
-    "name": "comfy-models-US-KS-2",
+    "name": "arrakis-comfy-models-us-ks-2",
     "size": 200,
     "data_center_id": "US-KS-2"
   },

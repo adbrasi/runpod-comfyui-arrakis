@@ -10,18 +10,21 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import boto3
 import requests
-from boto3.s3.transfer import TransferConfig
-from botocore.client import Config
 
 
 S3_ENDPOINTS = {
     "EUR-IS-1": "https://s3api-eur-is-1.runpod.io",
+    "EUR-NO-1": "https://s3api-eur-no-1.runpod.io",
     "EU-RO-1": "https://s3api-eu-ro-1.runpod.io",
     "EU-CZ-1": "https://s3api-eu-cz-1.runpod.io",
-    "US-KS-2": "https://s3api-us-ks-2.runpod.io",
     "US-CA-2": "https://s3api-us-ca-2.runpod.io",
+    "US-GA-2": "https://s3api-us-ga-2.runpod.io",
+    "US-KS-2": "https://s3api-us-ks-2.runpod.io",
+    "US-MD-1": "https://s3api-us-md-1.runpod.io",
+    "US-MO-2": "https://s3api-us-mo-2.runpod.io",
+    "US-NC-1": "https://s3api-us-nc-1.runpod.io",
+    "US-NC-2": "https://s3api-us-nc-2.runpod.io",
 }
 COMFY_MODEL_ROOT = "models/"
 
@@ -47,7 +50,20 @@ def endpoint_for_datacenter(data_center_id: str) -> str:
         ) from exc
 
 
+def parse_target(value: str) -> tuple[str, str]:
+    volume_id, separator, data_center_id = value.partition(":")
+    if not separator or not volume_id or not data_center_id:
+        raise ValueError("target must use the format <volume_id>:<data_center_id>")
+    return volume_id, data_center_id
+
+
 def create_s3_client(endpoint_url: str, access_key: str, secret_key: str, region: str):
+    try:
+        import boto3
+        from botocore.client import Config
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("boto3 is required to sync models to a Runpod volume") from exc
+
     retry_config = Config(
         retries={"max_attempts": int(os.environ.get("AWS_MAX_ATTEMPTS", "10")), "mode": "standard"},
         signature_version="s3v4",
@@ -128,6 +144,26 @@ def materialize_model(model: dict[str, Any], workdir: Path) -> Path:
     raise ValueError(f"unsupported model source: {source}")
 
 
+def resolve_targets(args: argparse.Namespace) -> list[tuple[str, str, str]]:
+    if args.target:
+        resolved_targets = []
+        for raw_target in args.target:
+            volume_id, data_center_id = parse_target(raw_target)
+            resolved_targets.append((volume_id, data_center_id, endpoint_for_datacenter(data_center_id)))
+        return resolved_targets
+
+    if not args.volume_id:
+        raise RuntimeError("set --volume-id or RUNPOD_VOLUME_ID, or provide one or more --target values")
+
+    endpoint_url = args.endpoint_url
+    if not endpoint_url:
+        if not args.data_center_id:
+            raise RuntimeError("set --endpoint-url or provide --data-center-id / RUNPOD_VOLUME_DATA_CENTER_ID")
+        endpoint_url = endpoint_for_datacenter(args.data_center_id)
+
+    return [(args.volume_id, args.data_center_id or os.environ.get("AWS_REGION") or "us-east-1", endpoint_url)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to model manifest JSON")
@@ -142,11 +178,13 @@ def main() -> None:
         default=os.environ.get("RUNPOD_VOLUME_S3_ENDPOINT"),
         help="Override the Runpod S3-compatible endpoint URL",
     )
+    parser.add_argument(
+        "--target",
+        action="append",
+        help="Repeatable target in the format <volume_id>:<data_center_id> to seed multiple volumes in one run",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print planned operations without uploading")
     args = parser.parse_args()
-
-    if not args.volume_id:
-        raise RuntimeError("set --volume-id or RUNPOD_VOLUME_ID")
 
     access_key = os.environ.get("RUNPOD_VOLUME_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID")
     secret_key = os.environ.get("RUNPOD_VOLUME_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY")
@@ -156,41 +194,43 @@ def main() -> None:
             "or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
         )
 
-    endpoint_url = args.endpoint_url
-    if not endpoint_url:
-        if not args.data_center_id:
-            raise RuntimeError("set --endpoint-url or provide --data-center-id / RUNPOD_VOLUME_DATA_CENTER_ID")
-        endpoint_url = endpoint_for_datacenter(args.data_center_id)
-
-    region = args.data_center_id or os.environ.get("AWS_REGION") or "us-east-1"
     manifest = json.loads(Path(args.config).read_text(encoding="utf-8"))
     models = manifest.get("models", [])
     if not models:
         print("[volume-sync] no models configured")
         return
 
-    client = create_s3_client(endpoint_url, access_key, secret_key, region)
+    targets = resolve_targets(args)
+    try:
+        from boto3.s3.transfer import TransferConfig
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("boto3 is required to sync models to a Runpod volume") from exc
+
     transfer = TransferConfig(multipart_threshold=64 * 1024 * 1024, multipart_chunksize=64 * 1024 * 1024)
 
-    for model in models:
-        if model.get("disabled"):
-            continue
+    for volume_id, region, endpoint_url in targets:
+        client = create_s3_client(endpoint_url, access_key, secret_key, region)
+        print(f"[volume-sync] target volume={volume_id} region={region} endpoint={endpoint_url}")
 
-        key = ensure_target_path(model["target_path"])
-        min_size_bytes = int(model.get("min_size_bytes", 1_000_000))
+        for model in models:
+            if model.get("disabled"):
+                continue
 
-        print(f"[volume-sync] upload target: s3://{args.volume_id}/{key}")
-        if args.dry_run:
-            continue
+            key = ensure_target_path(model["target_path"])
+            min_size_bytes = int(model.get("min_size_bytes", 1_000_000))
 
-        if object_exists(client, args.volume_id, key, min_size_bytes):
-            print(f"[volume-sync] cached: s3://{args.volume_id}/{key}")
-            continue
+            print(f"[volume-sync] upload target: s3://{volume_id}/{key}")
+            if args.dry_run:
+                continue
 
-        with tempfile.TemporaryDirectory(prefix="runpod-volume-sync-") as tmpdir:
-            local_file = materialize_model(model, Path(tmpdir))
-            client.upload_file(str(local_file), args.volume_id, key, Config=transfer)
-            print(f"[volume-sync] uploaded: s3://{args.volume_id}/{key}")
+            if object_exists(client, volume_id, key, min_size_bytes):
+                print(f"[volume-sync] cached: s3://{volume_id}/{key}")
+                continue
+
+            with tempfile.TemporaryDirectory(prefix="runpod-volume-sync-") as tmpdir:
+                local_file = materialize_model(model, Path(tmpdir))
+                client.upload_file(str(local_file), volume_id, key, Config=transfer)
+                print(f"[volume-sync] uploaded: s3://{volume_id}/{key}")
 
 
 if __name__ == "__main__":
