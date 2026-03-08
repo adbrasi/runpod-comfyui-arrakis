@@ -1,0 +1,32 @@
+{
+  "models": [
+    {
+      "source": "hf",
+      "repo_id": "black-forest-labs/FLUX.1-dev",
+      "filename": "flux1-dev.safetensors",
+      "target_path": "models/checkpoints/flux1-dev.safetensors",
+      "min_size_bytes": 1000000000
+    },
+    {
+      "source": "hf",
+      "repo_id": "comfyanonymous/flux_text_encoders",
+      "filename": "t5xxl_fp8_e4m3fn.safetensors",
+      "target_path": "models/text_encoders/t5xxl_fp8_e4m3fn.safetensors",
+      "min_size_bytes": 1000000000
+    },
+    {
+      "source": "hf",
+      "repo_id": "comfyanonymous/flux_text_encoders",
+      "filename": "clip_l.safetensors",
+      "target_path": "models/text_encoders/clip_l.safetensors",
+      "min_size_bytes": 100000000
+    },
+    {
+      "source": "hf",
+      "repo_id": "black-forest-labs/FLUX.1-dev",
+      "filename": "ae.safetensors",
+      "target_path": "models/vae/ae.safetensors",
+      "min_size_bytes": 100000000
+    }
+  ]
+}

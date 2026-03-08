@@ -1,0 +1,76 @@
+{
+  "nodes": [
+    {
+      "name": "ComfyUI-WanVideoWrapper",
+      "type": "git",
+      "url": "https://github.com/kijai/ComfyUI-WanVideoWrapper",
+      "commit": "df8f3e49daaad117cf3090cc916c83f3d001494c"
+    },
+    {
+      "name": "ComfyUI-LTXVideo",
+      "type": "git",
+      "url": "https://github.com/Lightricks/ComfyUI-LTXVideo",
+      "commit": "531512f7286963dc7aff1fd8bf5556e95eae03af"
+    },
+    {
+      "name": "ComfyUI-Easy-Use",
+      "type": "git",
+      "url": "https://github.com/yolain/ComfyUI-Easy-Use",
+      "commit": "a3f051f0c3557257fbf62839ed1a4a2442b1ed40"
+    },
+    {
+      "name": "ComfyUI-KJNodes",
+      "type": "git",
+      "url": "https://github.com/kijai/ComfyUI-KJNodes",
+      "commit": "c88ac88a8f8a6a090a0d5d607156090cb2911503"
+    },
+    {
+      "name": "ComfyUI-VideoHelperSuite",
+      "type": "git",
+      "url": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+      "commit": "993082e4f2473bf4acaf06f51e33877a7eb38960"
+    },
+    {
+      "name": "ComfyUI-InpaintEasy",
+      "type": "git",
+      "url": "https://github.com/CY-CHENYUE/ComfyUI-InpaintEasy",
+      "commit": "d631a03dea2397db27042f5e9ec34fce34b2cfb6"
+    },
+    {
+      "name": "ComfyUI-Impact-Subpack",
+      "type": "git",
+      "url": "https://github.com/ltdrdata/ComfyUI-Impact-Subpack",
+      "commit": "50c7b71a6a224734cc9b21963c6d1926816a97f1"
+    },
+    {
+      "name": "ComfyUI_tinyterraNodes",
+      "type": "git",
+      "url": "https://github.com/TinyTerra/ComfyUI_tinyterraNodes",
+      "commit": "b5bb57f4b13463bd31355edf0aeb83c57ff795b3"
+    },
+    {
+      "name": "ComfyUI-Impact-Pack",
+      "type": "git",
+      "url": "https://github.com/ltdrdata/ComfyUI-Impact-Pack",
+      "commit": "6a517ebe06fea2b74fc41b3bd089c0d7173eeced"
+    },
+    {
+      "name": "adfit-test-node",
+      "type": "git",
+      "url": "https://github.com/adbrasi/adfit-test-node",
+      "commit": "23d778160d4e8ea6e4a90538ecee56785be16f20"
+    },
+    {
+      "name": "rota_do_imperador-openrouter-single-node-public",
+      "type": "git",
+      "url": "https://github.com/adbrasi/rota_do_imperador-openrouter-single-node-public",
+      "commit": "c1d2446f5e72f4c918e08a0b966bf6f896bf651e"
+    },
+    {
+      "name": "ComfyUI-Custom-Scripts",
+      "type": "git",
+      "url": "https://github.com/pythongosssss/ComfyUI-Custom-Scripts",
+      "commit": "609f3afaa74b2f88ef9ce8d939626065e3247469"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "models": [
+    {
+      "source": "hf",
+      "repo_id": "OnomaAIResearch/Illustrious-XL-v1.0",
+      "filename": "Illustrious-XL-v1.0.safetensors",
+      "target_path": "models/checkpoints/Illustrious-XL-v1.0.safetensors",
+      "min_size_bytes": 1000000000
+    },
+    {
+      "source": "hf",
+      "repo_id": "madebyollin/sdxl-vae-fp16-fix",
+      "filename": "sdxl_vae.safetensors",
+      "target_path": "models/vae/sdxl_vae.safetensors",
+      "min_size_bytes": 100000000
+    }
+  ]
+}

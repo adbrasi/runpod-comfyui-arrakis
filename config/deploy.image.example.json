@@ -1,0 +1,62 @@
+{
+  "container_registry_auth": {
+    "enabled": true,
+    "name": "arrakis-ghcr",
+    "username_env": "GHCR_USERNAME",
+    "password_env": "GHCR_TOKEN"
+  },
+  "secrets": {
+    "arrakis-r2-access-key-id": {
+      "env_var": "R2_ACCESS_KEY_ID"
+    },
+    "arrakis-r2-secret-access-key": {
+      "env_var": "R2_SECRET_ACCESS_KEY"
+    }
+  },
+  "template": {
+    "name": "arrakis-comfyui-universal",
+    "image_name": "ghcr.io/your-github-user/your-repo:latest",
+    "container_disk_gb": 20,
+    "readme_path": "README.md",
+    "env": {
+      "COMFY_LOG_LEVEL": "INFO",
+      "DEFAULT_OUTPUT_MODE": "auto",
+      "REFRESH_WORKER": "false",
+      "WEBSOCKET_RECONNECT_ATTEMPTS": "5",
+      "WEBSOCKET_RECONNECT_DELAY_S": "3",
+      "S3_ENDPOINT_URL": "https://<account-id>.r2.cloudflarestorage.com",
+      "S3_BUCKET_NAME": "comfyui-outputs",
+      "S3_REGION": "auto",
+      "S3_PRESIGN_TTL_SECONDS": "86400"
+    },
+    "secret_env": {
+      "S3_ACCESS_KEY_ID": "arrakis-r2-access-key-id",
+      "S3_SECRET_ACCESS_KEY": "arrakis-r2-secret-access-key"
+    }
+  },
+  "network_volume": {
+    "enabled": true,
+    "name": "comfy-models-US-KS-2",
+    "size": 80,
+    "data_center_id": "US-KS-2"
+  },
+  "endpoint": {
+    "name": "arrakis-comfy-image-fb",
+    "gpu_type_ids": [
+      "NVIDIA RTX A5000",
+      "NVIDIA RTX A4500",
+      "NVIDIA A40"
+    ],
+    "gpu_count": 1,
+    "workers_min": 0,
+    "workers_max": 3,
+    "idle_timeout": 5,
+    "execution_timeout_ms": 900000,
+    "flashboot": true,
+    "scaler_type": "QUEUE_DELAY",
+    "scaler_value": 4,
+    "data_center_ids": [
+      "US-KS-2"
+    ]
+  }
+}

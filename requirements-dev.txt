@@ -1,0 +1,5 @@
+requests
+runpod
+websocket-client
+boto3
+huggingface_hub
