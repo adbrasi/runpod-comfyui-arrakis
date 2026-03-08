@@ -60,6 +60,10 @@ KNOWN_FILE_OUTPUT_TYPES = {
 }
 
 
+def _noop_progress(_message: str) -> None:
+    return None
+
+
 def _requests():
     import requests
 
@@ -616,17 +620,25 @@ def collect_outputs(job_id: str, prompt_history: dict[str, Any], output_mode: st
     return outputs
 
 
-def handler(job: dict[str, Any]) -> dict[str, Any]:
+def execute_job_input(
+    job_input: Any,
+    *,
+    job_id: str | None = None,
+    progress_cb: Any = None,
+) -> dict[str, Any]:
+    if progress_cb is None:
+        progress_cb = _noop_progress
+
     if is_network_volume_debug_enabled():
         run_network_volume_diagnostics()
 
-    _progress(job, "validating request")
-    normalized = validate_input(job.get("input"))
+    progress_cb("validating request")
+    normalized = validate_input(job_input)
 
     if not check_server(f"http://{COMFY_HOST}/system_stats"):
         raise RuntimeError(f"ComfyUI server is not reachable on {COMFY_HOST}")
 
-    job_id = job.get("id") or uuid.uuid4().hex
+    effective_job_id = job_id or uuid.uuid4().hex
     workflow = normalized["workflow"]
     assets = normalized["assets"]
     prompt_id: str | None = None
@@ -634,24 +646,24 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
     try:
         if assets:
-            _progress(job, "preparing assets")
-            remap = prepare_assets(job_id, assets)
+            progress_cb("preparing assets")
+            remap = prepare_assets(effective_job_id, assets)
             workflow = remap_workflow_paths(workflow, remap)
 
         if normalized["overrides"]:
-            _progress(job, "applying workflow overrides")
+            progress_cb("applying workflow overrides")
             apply_overrides(workflow, normalized["overrides"])
 
         client_id = uuid.uuid4().hex
-        _progress(job, "queueing workflow")
+        progress_cb("queueing workflow")
         prompt_id = queue_workflow(workflow, client_id, normalized.get("comfy_org_api_key"))
 
-        _progress(job, "waiting for comfyui execution")
+        progress_cb("waiting for comfyui execution")
         wait_for_completion(client_id, prompt_id)
 
-        _progress(job, "collecting outputs")
+        progress_cb("collecting outputs")
         prompt_history = wait_for_prompt_history(prompt_id)
-        outputs = collect_outputs(job_id, prompt_history, normalized["output_mode"])
+        outputs = collect_outputs(effective_job_id, prompt_history, normalized["output_mode"])
 
         result: dict[str, Any] = {
             "prompt_id": prompt_id,
@@ -680,7 +692,15 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
         if prompt_history:
             cleanup_prompt_outputs(prompt_history)
-        shutil.rmtree(COMFY_INPUT_ROOT / job_id, ignore_errors=True)
+        shutil.rmtree(COMFY_INPUT_ROOT / effective_job_id, ignore_errors=True)
+
+
+def handler(job: dict[str, Any]) -> dict[str, Any]:
+    return execute_job_input(
+        job.get("input"),
+        job_id=job.get("id"),
+        progress_cb=lambda message: _progress(job, message),
+    )
 
 
 if __name__ == "__main__":

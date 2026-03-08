@@ -5,6 +5,7 @@ Base de producao para rodar ComfyUI no Runpod Serverless com uma API unica para 
 ## O que esta pronto
 
 - `handler.py` universal para `workflow + overrides + assets + outputs genericos`
+- `lb_server.py` para expor a mesma API como endpoint `Load Balancer`
 - custom nodes instalados na imagem
 - modelos fora da imagem por padrao, em `Network Volume`
 - provisionamento idempotente de template, endpoint, secrets, auth e volumes
@@ -16,9 +17,12 @@ Base de producao para rodar ComfyUI no Runpod Serverless com uma API unica para 
 ```text
 Dockerfile
 handler.py
+lb_server.py
+start_lb.sh
 config/
   custom_nodes.json
   custom_nodes.ltx-lipsync.example.json
+  deploy.lb.example.json
   deploy.example.json
   deploy.heavy.example.json
   deploy.multi-region.example.json
@@ -42,7 +46,8 @@ tests/
 
 O desenho final recomendado para este projeto ficou assim:
 
-- 1 endpoint serverless principal para imagem
+- 1 endpoint `Load Balancer` principal para imagem de baixa latencia
+- 1 endpoint queue-based opcional para compatibilidade e jobs tolerantes a fila
 - 2 datacenters no mesmo endpoint quando voce quiser resiliencia global
 - 1 network volume por datacenter
 - custom nodes dentro da imagem
@@ -50,6 +55,8 @@ O desenho final recomendado para este projeto ficou assim:
 - object storage apenas para outputs grandes
 
 Isso evita rebuild de imagem por troca de modelo, reduz manutencao e nao obriga separar endpoint por regiao no backend.
+
+Importante: os testes reais desta base mostraram o plano queue-based do Runpod inconsistente sob concorrencia pequena. Para SaaS interativo com latencia e previsibilidade, `Load Balancer` e hoje o caminho preferido.
 
 ## Como escalar sem complicar
 
@@ -71,7 +78,7 @@ Se voce quer escolher manualmente uma regiao especifica por request, o caminho e
 
 ## Contrato da API
 
-O endpoint segue o padrao do Runpod:
+No modo queue-based, o endpoint segue o padrao do Runpod:
 
 - `POST /run`
 - `POST /runsync`
@@ -113,6 +120,16 @@ Aliases aceitos:
 - `auto`: usa S3/R2 se configurado, senao retorna inline
 - `inline` ou `base64`: retorna base64
 - `object_store` ou `s3`: retorna URL do storage
+
+No modo `Load Balancer`, a mesma logica universal fica disponivel em:
+
+- `GET /ping`
+- `GET /health`
+- `POST /generate`
+- `POST /run`
+- `POST /runsync`
+
+Nesses paths nao existe fila intermediaria do Runpod. Cada request vai direto a um worker HTTP.
 
 ## Handler e protecoes operacionais
 
@@ -200,6 +217,7 @@ Exemplo por commit:
 
 Perfis incluidos:
 
+- `config/deploy.lb.example.json`: load balancer single-region
 - `config/deploy.example.json`: canario single-region
 - `config/deploy.multi-region.example.json`: endpoint global simples
 - `config/deploy.heavy.example.json`: workload pesado separado
@@ -284,7 +302,7 @@ python scripts/load_test_endpoint.py \
   --save-json /tmp/runpod-load-test.json
 ```
 
-O modo `run` continua disponivel para investigar comportamento async, mas os testes reais desta base mostraram `runsync` mais previsivel sob carga.
+O modo `run` continua disponivel para investigar comportamento async. O script agora tambem suporta `--cancel-on-timeout` para encerrar jobs presos e evitar workers zumbis durante testes.
 
 ## Observacoes reais do Runpod
 
@@ -295,12 +313,16 @@ Pontos validados na pratica:
 - o attach multi-volume em endpoint nativo funciona, mas o caminho confiavel foi salvar isso via GraphQL
 - a conta precisa de quota suficiente para `workersMax`
 - cancelar o cliente local nao cancela automaticamente jobs ja enfileirados no Runpod
+- `POST /cancel/{job_id}` funciona para encerrar jobs presos
+- queue-based ficou inconsistente em testes `4x4` e `5x5`, com jobs presos em `IN_QUEUE` e `IN_PROGRESS`
+- `Load Balancer` pode ser criado via GraphQL com `type=LB`
 
 Por isso, a estrategia recomendada aqui e:
 
-- usar 1 endpoint global simples para imagem
+- usar `Load Balancer` para imagem interativa
+- usar queue-based apenas como fallback ou para workloads tolerantes a fila
 - usar volumes espelhados por regiao
-- usar `runsync` no backend principal
+- tratar `503 no workers available` e `503 worker busy` com retry curto no cliente quando usar `Load Balancer`
 - separar endpoint heavy apenas quando realmente necessario
 
 ## Build local

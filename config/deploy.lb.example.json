@@ -1,0 +1,50 @@
+{
+  "template": {
+    "name": "arrakis-comfyui-lb-prod",
+    "image_name": "ghcr.io/your-github-user/your-repo:latest",
+    "container_disk_gb": 20,
+    "docker_start_cmd": [
+      "/start_lb.sh"
+    ],
+    "ports": [
+      "8000/http"
+    ],
+    "readme_path": "README.md",
+    "env": {
+      "COMFY_LOG_LEVEL": "INFO",
+      "DEFAULT_OUTPUT_MODE": "inline",
+      "REFRESH_WORKER": "false",
+      "WEBSOCKET_RECONNECT_ATTEMPTS": "5",
+      "WEBSOCKET_RECONNECT_DELAY_S": "3",
+      "PORT": "8000",
+      "PORT_HEALTH": "8000"
+    }
+  },
+  "network_volume": {
+    "enabled": true,
+    "name": "arrakis-comfy-models-eu-ro-1",
+    "size": 80,
+    "data_center_id": "EU-RO-1"
+  },
+  "endpoint": {
+    "name": "arrakis-comfy-lb-eu",
+    "type": "LB",
+    "gpu_type_ids": [
+      "NVIDIA RTX A5000",
+      "NVIDIA GeForce RTX 4090",
+      "NVIDIA RTX A4500",
+      "NVIDIA GeForce RTX 3090"
+    ],
+    "gpu_count": 1,
+    "workers_min": 1,
+    "workers_max": 4,
+    "idle_timeout": 5,
+    "execution_timeout_ms": 900000,
+    "flashboot": true,
+    "scaler_type": "QUEUE_DELAY",
+    "scaler_value": 2,
+    "data_center_ids": [
+      "EU-RO-1"
+    ]
+  }
+}

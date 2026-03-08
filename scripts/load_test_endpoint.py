@@ -84,6 +84,7 @@ def wait_for_terminal_status(
     timeout_s: int,
     poll_interval_s: float,
     request_index: int,
+    cancel_on_timeout: bool,
 ) -> dict[str, Any]:
     deadline = time.time() + timeout_s
     status_url = f"{base_url}/status/{job_id}"
@@ -93,10 +94,17 @@ def wait_for_terminal_status(
         payload = response.json()
         status = payload.get("status")
         if status in {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}:
-            print(f"[load-test] request={request_index} job={job_id} status={status}")
+            print(f"[load-test] request={request_index} job={job_id} status={status}", flush=True)
             return payload
-        print(f"[load-test] request={request_index} job={job_id} status={status}")
+        print(f"[load-test] request={request_index} job={job_id} status={status}", flush=True)
         time.sleep(poll_interval_s)
+    if cancel_on_timeout:
+        cancelled = cancel_job(base_url, headers, job_id)
+        print(
+            f"[load-test] request={request_index} job={job_id} timed out; cancel status={cancelled.get('status')}",
+            flush=True,
+        )
+        return cancelled
     raise RuntimeError(f"timed out waiting for terminal status: {job_id}")
 
 
@@ -115,14 +123,46 @@ def wait_for_endpoint_drain(
         last_sample = sample
         jobs = sample.get("jobs", {})
         workers = sample.get("workers", {})
-        if int(jobs.get("inQueue", 0)) == 0 and int(jobs.get("inProgress", 0)) == 0 and int(workers.get("running", 0)) == 0:
+        # Pre-warmed and flashboot endpoints can keep workers alive while still being idle.
+        if int(jobs.get("inQueue", 0)) == 0 and int(jobs.get("inProgress", 0)) == 0:
             return sample
         print(
             "[load-test] waiting for endpoint drain "
-            f"(queue={jobs.get('inQueue', 0)} in_progress={jobs.get('inProgress', 0)} running={workers.get('running', 0)})"
+            f"(queue={jobs.get('inQueue', 0)} in_progress={jobs.get('inProgress', 0)} running={workers.get('running', 0)})",
+            flush=True,
         )
         time.sleep(poll_interval_s)
     raise RuntimeError(f"endpoint did not drain within {timeout_s}s: {json.dumps(last_sample or {}, indent=2)}")
+
+
+def wait_for_worker_capacity(
+    base_url: str,
+    headers: dict[str, str],
+    target_workers: int,
+    timeout_s: int,
+    poll_interval_s: float,
+) -> dict[str, Any] | None:
+    deadline = time.time() + timeout_s
+    last_sample: dict[str, Any] | None = None
+    while time.time() < deadline:
+        sample = record_health_sample(base_url, headers)
+        if not sample:
+            return None
+        last_sample = sample
+        jobs = sample.get("jobs", {})
+        workers = sample.get("workers", {})
+        live_workers = sum(int(workers.get(key, 0)) for key in ("idle", "ready", "running"))
+        initializing = int(workers.get("initializing", 0))
+        if int(jobs.get("inQueue", 0)) == 0 and int(jobs.get("inProgress", 0)) == 0 and initializing == 0 and live_workers >= target_workers:
+            return sample
+        print(
+            "[load-test] waiting for worker capacity "
+            f"(target={target_workers} live={live_workers} initializing={initializing} "
+            f"queue={jobs.get('inQueue', 0)} in_progress={jobs.get('inProgress', 0)})",
+            flush=True,
+        )
+        time.sleep(poll_interval_s)
+    raise RuntimeError(f"worker capacity did not reach {target_workers} within {timeout_s}s: {json.dumps(last_sample or {}, indent=2)}")
 
 
 def submit_async_job(
@@ -135,6 +175,19 @@ def submit_async_job(
     response.raise_for_status()
     job = response.json()
     return job["id"], job
+
+
+def cancel_job(
+    base_url: str,
+    headers: dict[str, str],
+    job_id: str,
+) -> dict[str, Any]:
+    response = requests.post(f"{base_url}/cancel/{job_id}", headers=headers, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"unexpected cancel payload for {job_id}: {payload!r}")
+    return payload
 
 
 def submit_sync_job(
@@ -160,6 +213,7 @@ def run_single_job(
     submit_timeout_s: int,
     poll_timeout_s: int,
     poll_interval_s: float,
+    cancel_on_timeout: bool,
 ) -> dict[str, Any]:
     started_at = time.time()
     payload = {
@@ -172,7 +226,7 @@ def run_single_job(
 
     if request_mode == "run":
         job_id, _job = submit_async_job(base_url, headers, payload, submit_timeout_s)
-        print(f"[load-test] request={request_index} submitted async job={job_id}")
+        print(f"[load-test] request={request_index} submitted async job={job_id}", flush=True)
         terminal = wait_for_terminal_status(
             base_url,
             headers,
@@ -180,11 +234,12 @@ def run_single_job(
             timeout_s=poll_timeout_s,
             poll_interval_s=poll_interval_s,
             request_index=request_index,
+            cancel_on_timeout=cancel_on_timeout,
         )
     else:
         job_id, terminal = submit_sync_job(base_url, headers, payload, submit_timeout_s)
         status = terminal.get("status")
-        print(f"[load-test] request={request_index} runsync status={status} job={job_id}")
+        print(f"[load-test] request={request_index} runsync status={status} job={job_id}", flush=True)
         if status not in {None, "COMPLETED"} and job_id:
             terminal = wait_for_terminal_status(
                 base_url,
@@ -193,6 +248,7 @@ def run_single_job(
                 timeout_s=poll_timeout_s,
                 poll_interval_s=poll_interval_s,
                 request_index=request_index,
+                cancel_on_timeout=cancel_on_timeout,
             )
 
     finished_at = time.time()
@@ -292,6 +348,9 @@ def main() -> None:
     parser.add_argument("--poll-interval-s", type=float, default=2.0)
     parser.add_argument("--health-poll-interval-s", type=float, default=2.0)
     parser.add_argument("--wait-for-drain-timeout-s", type=int, default=0)
+    parser.add_argument("--wait-for-worker-count", type=int, default=0)
+    parser.add_argument("--wait-for-worker-timeout-s", type=int, default=900)
+    parser.add_argument("--cancel-on-timeout", action="store_true")
     parser.add_argument("--save-json", help="Path to save the full summary JSON")
     args = parser.parse_args()
 
@@ -306,6 +365,15 @@ def main() -> None:
             base_url,
             headers,
             timeout_s=args.wait_for_drain_timeout_s,
+            poll_interval_s=args.poll_interval_s,
+        )
+
+    if args.wait_for_worker_count > 0:
+        wait_for_worker_capacity(
+            base_url,
+            headers,
+            target_workers=args.wait_for_worker_count,
+            timeout_s=args.wait_for_worker_timeout_s,
             poll_interval_s=args.poll_interval_s,
         )
 
@@ -336,6 +404,7 @@ def main() -> None:
                     submit_timeout_s=args.submit_timeout_s,
                     poll_timeout_s=args.poll_timeout_s,
                     poll_interval_s=args.poll_interval_s,
+                    cancel_on_timeout=args.cancel_on_timeout,
                 )
                 future_to_request_index[future] = index
 
@@ -344,7 +413,7 @@ def main() -> None:
                 try:
                     results.append(future.result())
                 except Exception as exc:
-                    print(f"[load-test] request={request_index} failed: {exc}")
+                    print(f"[load-test] request={request_index} failed: {exc}", flush=True)
                     results.append(failure_result(request_index, args.request_mode, exc))
     finally:
         health_stop.set()
@@ -358,7 +427,7 @@ def main() -> None:
     if args.save_json:
         output_path = Path(args.save_json)
         output_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        print(f"[load-test] saved summary: {output_path}")
+        print(f"[load-test] saved summary: {output_path}", flush=True)
 
 
 if __name__ == "__main__":

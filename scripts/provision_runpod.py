@@ -378,11 +378,17 @@ def parse_locations(locations: str | None) -> list[str]:
 
 
 def endpoint_output_record(endpoint: dict[str, Any]) -> dict[str, Any]:
+    endpoint_type = endpoint.get("type") or "QB"
+    if endpoint_type == "LB":
+        url = f"https://{endpoint['id']}.api.runpod.ai"
+    else:
+        url = f"https://api.runpod.ai/v2/{endpoint['id']}"
     return {
         "id": endpoint["id"],
         "name": endpoint["name"],
-        "url": f"https://api.runpod.ai/v2/{endpoint['id']}",
+        "url": url,
         "data_center_ids": parse_locations(endpoint.get("locations")),
+        "type": endpoint_type,
     }
 
 
@@ -407,13 +413,15 @@ def build_graphql_endpoint_input(
     if len(set(network_volume_dcs)) != len(network_volume_dcs):
         raise RuntimeError("each attached network volume must belong to a distinct data center")
 
-    if data_center_ids and set(data_center_ids) != set(network_volume_dcs):
+    if network_volume_dcs and data_center_ids and set(data_center_ids) != set(network_volume_dcs):
         raise RuntimeError(
             "endpoint.data_center_ids must match the attached network volume data centers when network volumes are attached: "
             f"{', '.join(sorted(network_volume_dcs))}"
         )
-    if not data_center_ids:
+    if network_volume_dcs and not data_center_ids:
         data_center_ids = network_volume_dcs.copy()
+    elif not data_center_ids and existing_endpoint.get("locations"):
+        data_center_ids = parse_locations(existing_endpoint.get("locations"))
 
     gpu_ids = existing_endpoint.get("gpuIds")
     if not gpu_ids:
@@ -434,13 +442,14 @@ def build_graphql_endpoint_input(
         "locations": ",".join(data_center_ids),
         "scalerType": endpoint_cfg.get("scaler_type", "QUEUE_DELAY"),
         "scalerValue": endpoint_cfg.get("scaler_value", 4),
-        "networkVolumeIds": [{"networkVolumeId": item["id"]} for item in network_volumes],
         "gpuCount": endpoint_cfg.get("gpu_count", 1),
         "executionTimeoutMs": endpoint_cfg.get("execution_timeout_ms", 900000),
         "flashBootType": flash_boot_type,
         "bindEndpoint": endpoint_cfg.get("bind_endpoint", True),
         "type": endpoint_cfg.get("type") or existing_endpoint.get("type") or "QB",
     }
+    if network_volumes:
+        payload["networkVolumeIds"] = [{"networkVolumeId": item["id"]} for item in network_volumes]
 
     allowed_cuda_versions = endpoint_cfg.get("allowed_cuda_versions")
     if allowed_cuda_versions:
@@ -555,7 +564,7 @@ def upsert_endpoint(client: RunpodClient, payload: dict[str, Any]) -> dict[str, 
     return created
 
 
-def upsert_native_multi_region_endpoint(
+def upsert_graphql_endpoint(
     client: RunpodClient,
     template_id: str,
     full_config: dict[str, Any],
@@ -577,7 +586,7 @@ def upsert_native_multi_region_endpoint(
 
     graphql_payload = build_graphql_endpoint_input(existing_graphql, template_id, full_config, network_volumes)
     saved = client.save_graphql_endpoint(graphql_payload)
-    print(f"[runpod] endpoint updated via GraphQL native multi-region: {saved['name']} ({saved['id']})")
+    print(f"[runpod] endpoint updated via GraphQL: {saved['name']} ({saved['id']})")
     return saved
 
 
@@ -602,9 +611,10 @@ def main() -> None:
     template_payload = build_template_payload(config_dir, full_config, container_registry_auth_id)
     template = upsert_template(client, template_payload)
     multi_region_mode = full_config.get("endpoint", {}).get("multi_region_mode", "native")
+    endpoint_type = full_config.get("endpoint", {}).get("type", "QB")
 
-    if len(network_volumes) > 1 and multi_region_mode == "native":
-        endpoints = [upsert_native_multi_region_endpoint(client, template["id"], full_config, network_volumes)]
+    if endpoint_type != "QB" or (len(network_volumes) > 1 and multi_region_mode == "native"):
+        endpoints = [upsert_graphql_endpoint(client, template["id"], full_config, network_volumes)]
     else:
         endpoint_payload = build_endpoint_payload(template["id"], full_config, network_volumes)
         endpoints = [upsert_endpoint(client, endpoint_payload)]
@@ -625,7 +635,7 @@ def main() -> None:
     output = {
         "template_id": template["id"],
         "endpoint_id": endpoint["id"] if endpoint else None,
-        "endpoint_url": f"https://api.runpod.ai/v2/{endpoint['id']}" if endpoint else None,
+        "endpoint_url": endpoint_output_record(endpoint)["url"] if endpoint else None,
         "network_volume_id": network_volume["id"] if network_volume else None,
         "network_volume_data_center_id": network_volume.get("dataCenterId") if network_volume else None,
         "network_volume_s3_endpoint": (
